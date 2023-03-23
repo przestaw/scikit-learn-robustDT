@@ -1264,6 +1264,16 @@ class RandomForestClassifier(ForestClassifier):
 
         .. versionadded:: 0.22
 
+    splitter : {"best", "random", "robust"}, default="best"
+        Split strategy of the underlying
+        :class:`~sklearn.tree.DecisionTreeClassifier` estimators. "robust"
+        uses the robust splitter (dense input only, see ``ROBUST_PORT.md``);
+        it evaluates all features at every node, ignoring ``max_features``.
+
+    eps : float, default=0.1
+        Perturbation radius used by ``splitter="robust"``. Ignored by the
+        other splitters.
+
     Attributes
     ----------
     estimator_ : :class:`~sklearn.tree.DecisionTreeClassifier`
@@ -1378,7 +1388,6 @@ class RandomForestClassifier(ForestClassifier):
             None,
         ],
     }
-    _parameter_constraints.pop("splitter")
 
     def __init__(
         self,
@@ -1401,6 +1410,8 @@ class RandomForestClassifier(ForestClassifier):
         class_weight=None,
         ccp_alpha=0.0,
         max_samples=None,
+        splitter="best",
+        eps=0.1,
     ):
         super().__init__(
             estimator=DecisionTreeClassifier(),
@@ -1416,6 +1427,8 @@ class RandomForestClassifier(ForestClassifier):
                 "min_impurity_decrease",
                 "random_state",
                 "ccp_alpha",
+                "splitter",
+                "eps",
             ),
             bootstrap=bootstrap,
             oob_score=oob_score,
@@ -1436,6 +1449,8 @@ class RandomForestClassifier(ForestClassifier):
         self.max_leaf_nodes = max_leaf_nodes
         self.min_impurity_decrease = min_impurity_decrease
         self.ccp_alpha = ccp_alpha
+        self.splitter = splitter
+        self.eps = eps
 
 
 class RandomForestRegressor(ForestRegressor):
@@ -2070,6 +2085,7 @@ class ExtraTreesClassifier(ForestClassifier):
         ],
     }
     _parameter_constraints.pop("splitter")
+    _parameter_constraints.pop("eps")
 
     def __init__(
         self,

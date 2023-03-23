@@ -13,7 +13,9 @@
 
 from ._criterion cimport Criterion
 
+from libc.stdlib cimport free
 from libc.stdlib cimport qsort
+from libc.math cimport ceil, fabs, floor
 from libc.string cimport memcpy
 
 import numpy as np
@@ -24,6 +26,7 @@ from ._utils cimport log
 from ._utils cimport rand_int
 from ._utils cimport rand_uniform
 from ._utils cimport RAND_R_MAX
+from ._utils cimport safe_realloc
 
 cdef double INFINITY = np.inf
 
@@ -1493,3 +1496,302 @@ cdef class RandomSparseSplitter(BaseSparseSplitter):
         split[0] = best
         n_constant_features[0] = n_total_constants
         return 0
+
+
+# Robust splitter ported from the ``robustDT`` branch of
+# https://github.com/yangarbiter/scikit-learn (Yao-Yuan Yang, 2019),
+# fork commit e9d32da6cd92ced574ccfb74a532a3388cd33f3b. It implements the
+# robust splitting defence of Chen et al., "Robust Decision Trees Against
+# Adversarial Examples" (ICML 2019, arXiv:1902.10660) for dense input.
+# The split scoring is kept as in the original fork, including its quirks
+# (see ROBUST_PORT.md), so that experiments run with the fork can be
+# reproduced.
+cdef class RobustSplitter(BaseDenseSplitter):
+    """Splitter that maximizes a robust (worst-case over ``eps``) score."""
+
+    cdef public double eps
+
+    def __reduce__(self):
+        return (RobustSplitter, (self.criterion,
+                                 self.max_features,
+                                 self.min_samples_leaf,
+                                 self.min_weight_leaf,
+                                 self.random_state), self.__getstate__())
+
+    def __getstate__(self):
+        return {"eps": self.eps}
+
+    def __setstate__(self, d):
+        self.eps = d["eps"]
+
+    cdef int node_split(self, double impurity, SplitRecord* split,
+                        SIZE_t* n_constant_features) nogil except -1:
+        """Find the best robust split on node samples[start:end]
+
+        Returns -1 in case of failure to allocate memory (and raise MemoryError)
+        or 0 otherwise.
+        """
+        cdef SIZE_t[::1] samples = self.samples
+        cdef SIZE_t start = self.start
+        cdef SIZE_t end = self.end
+
+        cdef SIZE_t n_features = self.n_features
+
+        cdef DTYPE_t[::1] Xf = self.feature_values
+        cdef SIZE_t min_samples_leaf = self.min_samples_leaf
+        cdef double min_weight_leaf = self.min_weight_leaf
+
+        cdef SplitRecord best, current
+
+        cdef SIZE_t f_i
+        cdef SIZE_t f_j
+        cdef SIZE_t p
+        cdef SIZE_t i
+        cdef SIZE_t j
+        cdef SIZE_t partition_end
+
+        cdef double score
+        cdef double best_score = -INFINITY
+        # Scratch buffers for robust_entropy, allocated once per node
+        cdef SIZE_t n_node_samples = end - start
+        cdef SIZE_t* buf = NULL
+
+        _init_split(&best, end)
+        safe_realloc(&buf, 3 * n_node_samples)
+
+        # Unlike BestSplitter, every feature is evaluated (max_features and
+        # constant-feature bookkeeping are not used), as in the original fork.
+        for f_j in range(n_features):
+            current.feature = f_j
+
+            for i in range(start, end):
+                Xf[i] = self.X[samples[i], current.feature]
+            sort(&Xf[start], &samples[start], end - start)
+
+            j = start
+            for f_i in range(start, end - 1):
+                if Xf[j] > Xf[f_i + 1] + FEATURE_THRESHOLD:
+                    continue
+                j = f_i
+
+                current.threshold = (Xf[f_i] + Xf[f_i + 1]) / 2
+                current.pos = f_i
+
+                if (((current.pos - start) < min_samples_leaf) or
+                        ((end - current.pos) < min_samples_leaf)):
+                    continue
+
+                self.criterion.reset()
+                self.criterion.update(current.pos)
+
+                # Reject if min_weight_leaf is not satisfied
+                if ((self.criterion.weighted_n_left < min_weight_leaf) or
+                        (self.criterion.weighted_n_right < min_weight_leaf)):
+                    continue
+
+                score = robust_entropy(&Xf[0], current.threshold,
+                                       &samples[0], start, end, self.y,
+                                       self.sample_weight, self.eps,
+                                       buf, buf + n_node_samples,
+                                       buf + 2 * n_node_samples)
+                if best_score < score:
+                    best = current  # copy
+                    best_score = score
+
+        # Reorganize into samples[start:best.pos] + samples[best.pos:end]
+        if best.pos < end:
+            partition_end = end
+            p = start
+
+            while p < partition_end:
+                if self.X[samples[p], best.feature] <= best.threshold:
+                    p += 1
+
+                else:
+                    partition_end -= 1
+
+                    samples[p], samples[partition_end] = samples[partition_end], samples[p]
+
+            self.criterion.reset()
+            self.criterion.update(best.pos)
+            self.criterion.children_impurity(&best.impurity_left,
+                                             &best.impurity_right)
+            best.improvement = self.criterion.impurity_improvement(
+                impurity, best.impurity_left, best.impurity_right)
+
+        free(buf)
+
+        # Return values
+        split[0] = best
+        return 0
+
+
+cdef void get_label_counts(SIZE_t n, SIZE_t* I, const DOUBLE_t[:, ::1] y,
+                           const DOUBLE_t[:] sample_weight,
+                           SIZE_t* n0, SIZE_t* n1,
+                           double* wn0, double* wn1) nogil:
+    cdef SIZE_t i
+
+    for i in range(n):
+        if <int>(y[I[i], 0]) == 0:
+            n0[0] += 1
+            if sample_weight is not None:
+                wn0[0] += sample_weight[I[i]]
+            else:
+                wn0[0] += 1
+        else:
+            n1[0] += 1
+            if sample_weight is not None:
+                wn1[0] += sample_weight[I[i]]
+            else:
+                wn1[0] += 1
+
+
+cdef double robust_entropy(DTYPE_t* Xf, DTYPE_t threshold,
+                           SIZE_t* samples, SIZE_t start, SIZE_t end,
+                           const DOUBLE_t[:, ::1] y,
+                           const DOUBLE_t[:] sample_weight,
+                           double eps,
+                           SIZE_t* Id, SIZE_t* Ip, SIZE_t* In) nogil:
+    """Robust split score of the original fork (higher is better).
+
+    Samples within ``eps`` of ``threshold`` may be moved to either side by an
+    adversary; label 0 is treated as one class and every other label as the
+    other class. ``Id``, ``Ip`` and ``In`` are scratch buffers of size
+    ``end - start``.
+    """
+    cdef SIZE_t i
+    cdef SIZE_t n_d = 0
+    cdef SIZE_t n_p = 0
+    cdef SIZE_t n_n = 0
+    cdef double wn_d = 0
+    cdef double wn_p = 0
+    cdef double wn_n = 0
+
+    cdef double min_diff
+    cdef SIZE_t ce
+    cdef SIZE_t fl
+    cdef SIZE_t N0 = 0
+    cdef SIZE_t N1 = 0
+    cdef double wN0 = 0
+    cdef double wN1 = 0
+    cdef SIZE_t dn1p
+
+    cdef SIZE_t n00 = 0
+    cdef SIZE_t n01 = 0
+    cdef SIZE_t n10 = 0
+    cdef SIZE_t n11 = 0
+    cdef SIZE_t nd0 = 0
+    cdef SIZE_t nd1 = 0
+    cdef double wn00 = 0
+    cdef double wn01 = 0
+    cdef double wn10 = 0
+    cdef double wn11 = 0
+    cdef double wnd0 = 0
+    cdef double wnd1 = 0
+
+    cdef double best_dn0 = 0.
+    cdef double best_dn1 = 0.
+    cdef SIZE_t dn0
+    cdef double dn1
+    cdef double wn_samples
+    cdef double temp
+    cdef double il
+    cdef double ir
+
+    # As in the original fork, the node class totals index y and
+    # sample_weight by node position i (not samples[i]).
+    for i in range(start, end):
+        if <int>(y[i, 0]) == 0:
+            N0 += 1
+            if sample_weight is not None:
+                wN0 += sample_weight[i]
+            else:
+                wN0 += 1
+        else:
+            N1 += 1
+            if sample_weight is not None:
+                wN1 += sample_weight[i]
+            else:
+                wN1 += 1
+
+    for i in range(start, end):
+        if Xf[i] <= threshold - eps:
+            In[n_n] = samples[i]
+            n_n += 1
+            if sample_weight is not None:
+                wn_n += sample_weight[samples[i]]
+            else:
+                wn_n += 1
+        elif Xf[i] >= threshold + eps:
+            Ip[n_p] = samples[i]
+            n_p += 1
+            if sample_weight is not None:
+                wn_p += sample_weight[samples[i]]
+            else:
+                wn_p += 1
+        else:
+            Id[n_d] = samples[i]
+            n_d += 1
+            if sample_weight is not None:
+                wn_d += sample_weight[samples[i]]
+            else:
+                wn_d += 1
+
+    get_label_counts(n_n, In, y, sample_weight, &n00, &n01, &wn00, &wn01)
+    get_label_counts(n_p, Ip, y, sample_weight, &n10, &n11, &wn10, &wn11)
+    get_label_counts(n_d, Id, y, sample_weight, &nd0, &nd1, &wnd0, &wnd1)
+
+    # Choose how many label-0 / label-1 samples of the eps-band go left
+    min_diff = INFINITY
+    for dn0 in range(n_d):
+        if <int>(y[Id[dn0], 0]) == 1:
+            continue
+        ce = <SIZE_t>ceil(wN1 * (wn00 + dn0) / wN0) + n01
+        fl = <SIZE_t>floor(wN1 * (wn00 + dn0) / wN0) + n01
+
+        for dn1p in range(fl, ce):
+            dn1 = max(min((<double>dn1p), wnd1), <double>0.)
+            temp = fabs((dn0 + wn00) / wN0 - (dn1 + wn01) / wN1)
+            if min_diff > temp:
+                best_dn0 = dn0
+                best_dn1 = dn1
+                min_diff = temp
+
+    wn_samples = wN0 + wN1
+    temp = (
+        - N0 / wn_samples * log(N0 / wn_samples)
+        - N1 / wn_samples * log(N1 / wn_samples)
+    )
+    il = (wn_n + best_dn0 + best_dn1)
+    ir = (wn_p + wn_d - best_dn0 - best_dn1)
+    min_diff = 0
+    if ir == 0:
+        if ((wn00 + best_dn0) / il) > 0:
+            min_diff += - ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il)
+        if ((wn01 + best_dn1) / il) > 0:
+            min_diff += - ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+    elif il == 0:
+        if ((wn10 + (wnd0 - best_dn0)) / ir) > 0:
+            min_diff += - ((wn10 + (wnd0 - best_dn0)) / ir) * log((wn10 + (wnd0 - best_dn0)) / ir)
+        if ((wn11 + (wnd1 - best_dn1)) / ir) > 0:
+            min_diff += - ((wn11 + (wnd1 - best_dn1)) / ir) * log((wn11 + (wnd1 - best_dn1)) / ir)
+    else:
+        if ((wn00 + best_dn0) / il) > 0:
+            min_diff += - il / wn_samples * (
+                ((wn00 + best_dn0) / il) * log((wn00 + best_dn0) / il)
+            )
+        if ((wn01 + best_dn1) / il) > 0:
+            min_diff += - il / wn_samples * (
+                ((wn01 + best_dn1) / il) * log((wn01 + best_dn1) / il)
+            )
+        if ((wn10 + (wnd0 - best_dn0)) / ir) > 0:
+            min_diff += - ir / wn_samples * (
+                ((wn10 + (wnd0 - best_dn0)) / ir) * log((wn10 + (wnd0 - best_dn0)) / ir)
+            )
+        if ((wn11 + (wnd1 - best_dn1)) / ir) > 0:
+            min_diff += - ir / wn_samples * (
+                ((wn11 + (wnd1 - best_dn1)) / ir) * log((wn11 + (wnd1 - best_dn1)) / ir)
+            )
+
+    return temp - min_diff

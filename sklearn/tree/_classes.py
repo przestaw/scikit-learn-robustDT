@@ -75,7 +75,11 @@ CRITERIA_REG = {
     "poisson": _criterion.Poisson,
 }
 
-DENSE_SPLITTERS = {"best": _splitter.BestSplitter, "random": _splitter.RandomSplitter}
+DENSE_SPLITTERS = {
+    "best": _splitter.BestSplitter,
+    "random": _splitter.RandomSplitter,
+    "robust": _splitter.RobustSplitter,
+}
 
 SPARSE_SPLITTERS = {
     "best": _splitter.BestSparseSplitter,
@@ -337,6 +341,10 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
 
         splitter = self.splitter
         if not isinstance(self.splitter, Splitter):
+            if self.splitter not in SPLITTERS:
+                raise ValueError(
+                    f"splitter={self.splitter!r} does not support sparse input."
+                )
             splitter = SPLITTERS[self.splitter](
                 criterion,
                 self.max_features_,
@@ -344,6 +352,8 @@ class BaseDecisionTree(MultiOutputMixin, BaseEstimator, metaclass=ABCMeta):
                 min_weight_leaf,
                 random_state,
             )
+            if self.splitter == "robust":
+                splitter.eps = self.eps
 
         if is_classifier(self):
             self.tree_ = Tree(self.n_features_in_, self.n_classes_, self.n_outputs_)
@@ -604,10 +614,12 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         "gini" for the Gini impurity and "log_loss" and "entropy" both for the
         Shannon information gain, see :ref:`tree_mathematical_formulation`.
 
-    splitter : {"best", "random"}, default="best"
+    splitter : {"best", "random", "robust"}, default="best"
         The strategy used to choose the split at each node. Supported
-        strategies are "best" to choose the best split and "random" to choose
-        the best random split.
+        strategies are "best" to choose the best split, "random" to choose
+        the best random split and "robust" to choose the split maximizing the
+        robust score of Chen et al. (2019) against perturbations of size
+        ``eps`` (dense input only, see ``ROBUST_PORT.md``).
 
     max_depth : int, default=None
         The maximum depth of the tree. If None, then nodes are expanded until
@@ -729,6 +741,12 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 
         .. versionadded:: 0.22
 
+    eps : float, default=0.1
+        Perturbation radius used by ``splitter="robust"``: samples whose
+        feature value lies within ``eps`` of a candidate threshold are treated
+        as adversarially movable to either side. Ignored by the other
+        splitters.
+
     Attributes
     ----------
     classes_ : ndarray of shape (n_classes,) or list of ndarray
@@ -821,8 +839,10 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
 
     _parameter_constraints: dict = {
         **BaseDecisionTree._parameter_constraints,
+        "splitter": [StrOptions({"best", "random", "robust"})],
         "criterion": [StrOptions({"gini", "entropy", "log_loss"}), Hidden(Criterion)],
         "class_weight": [dict, list, StrOptions({"balanced"}), None],
+        "eps": [Interval(Real, 0.0, None, closed="left")],
     }
 
     def __init__(
@@ -840,6 +860,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
         min_impurity_decrease=0.0,
         class_weight=None,
         ccp_alpha=0.0,
+        eps=0.1,
     ):
         super().__init__(
             criterion=criterion,
@@ -855,6 +876,7 @@ class DecisionTreeClassifier(ClassifierMixin, BaseDecisionTree):
             min_impurity_decrease=min_impurity_decrease,
             ccp_alpha=ccp_alpha,
         )
+        self.eps = eps
 
     def fit(self, X, y, sample_weight=None, check_input=True):
         """Build a decision tree classifier from the training set (X, y).
@@ -1505,6 +1527,12 @@ class ExtraTreeClassifier(DecisionTreeClassifier):
     >>> cls.score(X_test, y_test)
     0.8947...
     """
+
+    _parameter_constraints: dict = {
+        **DecisionTreeClassifier._parameter_constraints,
+        "splitter": BaseDecisionTree._parameter_constraints["splitter"],
+    }
+    _parameter_constraints.pop("eps")
 
     def __init__(
         self,
