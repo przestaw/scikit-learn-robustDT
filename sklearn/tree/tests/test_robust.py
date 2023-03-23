@@ -22,6 +22,13 @@ def moons():
     return make_moons(n_samples=200, noise=0.2, random_state=0)
 
 
+def test_robust_params_match_original_fork():
+    tree_params = DecisionTreeClassifier().get_params()
+    forest_params = RandomForestClassifier().get_params()
+    assert (tree_params["splitter"], tree_params["eps"]) == ("best", 0.1)
+    assert (forest_params["splitter"], forest_params["eps"]) == ("best", 0.1)
+
+
 @pytest.mark.parametrize("eps", [0.0, 0.05, 0.5])
 def test_robust_tree_fit_predict(moons, eps):
     X, y = moons
@@ -65,9 +72,13 @@ def test_robust_forest_fit_predict(moons):
     assert rf.get_params()["splitter"] == "robust"
     assert all(t.splitter == "robust" and t.eps == 0.05 for t in rf.estimators_)
     assert rf.score(X, y) > 0.8
-    # Threaded fitting gives the same forest as sequential fitting.
+    # Threaded fitting gives the same trees as sequential fitting; threaded
+    # predict_proba sums the trees in a different order, hence allclose.
     rf2 = RandomForestClassifier(n_jobs=2, **params).fit(X, y)
-    np.testing.assert_array_equal(rf.predict_proba(X), rf2.predict_proba(X))
+    for t1, t2 in zip(rf.estimators_, rf2.estimators_):
+        np.testing.assert_array_equal(t1.tree_.threshold, t2.tree_.threshold)
+        np.testing.assert_array_equal(t1.tree_.value, t2.tree_.value)
+    np.testing.assert_allclose(rf.predict_proba(X), rf2.predict_proba(X))
 
 
 def test_robust_tree_pickle(moons):
