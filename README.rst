@@ -1,5 +1,83 @@
 .. -*- mode: rst -*-
 
+Robust decision trees for scikit-learn 1.2 (robustDT)
+=====================================================
+
+This repository is an updated implementation, by Przemysław Stawczyk, of the
+robust decision tree splitter written by Yao-Yuan Yang
+(`yangarbiter/scikit-learn@robustDT <https://github.com/yangarbiter/scikit-learn/tree/robustDT>`_).
+The splitter implements the robust splitting defence of H. Chen, H. Zhang,
+D. Boning and C.-J. Hsieh, "Robust Decision Trees Against Adversarial
+Examples", ICML 2019 (arXiv:1902.10660).
+
+The original fork is based on a scikit-learn 0.21 development snapshot (2019)
+and Python 3.7. This version moves it to the scikit-learn 1.2 release line
+(tag ``1.2.2``), so it builds and runs with Python 3.10/3.11:
+
+- ``DecisionTreeClassifier(splitter="robust", eps=...)`` and
+  ``RandomForestClassifier(splitter="robust", eps=...)`` keep the original
+  names and defaults;
+- the robust splitter is rewritten for the 1.2 tree internals and grew the
+  same trees as the original fork in every tested configuration;
+- unsupported uses (sparse input, regressors, extra-trees) now raise an error
+  instead of being silently accepted;
+- ``n_jobs`` works for robust forests again;
+- tests: ``sklearn/tree/tests/test_robust.py``.
+
+This version was made so that the code of the author's MSc thesis on
+explanations of adversarially robust tree ensembles (Warsaw University of
+Technology, 2023) runs on current Python. All credit for the algorithm and the
+original code goes to their authors. scikit-learn is BSD-3-Clause licensed (see
+``COPYING``); this version keeps that license.
+
+Citation
+--------
+
+This is the same robust splitting logic as in the original fork, carried over
+to a newer scikit-learn. If you use it, please cite the original work:
+
+- H. Chen, H. Zhang, D. Boning, C.-J. Hsieh. Robust Decision Trees Against
+  Adversarial Examples. ICML 2019, PMLR 97:1122-1131.
+  https://proceedings.mlr.press/v97/chen19m.html
+- Y.-Y. Yang, C. Rashtchian, Y. Wang, K. Chaudhuri. Robustness for
+  Non-Parametric Classification: A Generic Attack and Defense. AISTATS 2020,
+  PMLR 108:941-951. https://proceedings.mlr.press/v108/yang20b.html
+  (authors of the original ``robustDT`` fork, used in
+  `adversarial-nonparametrics <https://github.com/yangarbiter/adversarial-nonparametrics>`_)
+
+.. code-block:: bibtex
+
+    @inproceedings{chen2019robust,
+      title     = {Robust Decision Trees Against Adversarial Examples},
+      author    = {Chen, Hongge and Zhang, Huan and Boning, Duane and Hsieh, Cho-Jui},
+      booktitle = {Proceedings of the 36th International Conference on Machine Learning},
+      series    = {Proceedings of Machine Learning Research},
+      volume    = {97},
+      pages     = {1122--1131},
+      year      = {2019},
+      publisher = {PMLR}
+    }
+
+    @inproceedings{yang2020robustness,
+      title     = {Robustness for Non-Parametric Classification: A Generic Attack and Defense},
+      author    = {Yang, Yao-Yuan and Rashtchian, Cyrus and Wang, Yizhen and Chaudhuri, Kamalika},
+      booktitle = {Proceedings of the Twenty Third International Conference on Artificial Intelligence and Statistics},
+      series    = {Proceedings of Machine Learning Research},
+      volume    = {108},
+      pages     = {941--951},
+      year      = {2020},
+      publisher = {PMLR}
+    }
+
+Build instructions, details and known limitations: `ROBUST_PORT.md <ROBUST_PORT.md>`_.
+
+Branches: ``robustDT-sklearn-1.2`` (this version), ``robustDT`` (the original
+fork, unchanged), ``mirror-notes`` (the original fork plus a description).
+
+The upstream scikit-learn README follows.
+
+----
+
 |Azure|_ |CirrusCI|_ |Codecov|_ |CircleCI|_ |Nightly wheels|_ |Black|_ |PythonVersion|_ |PyPi|_ |DOI|_ |Benchmark|_
 
 .. |Azure| image:: https://dev.azure.com/scikit-learn/scikit-learn/_apis/build/status/scikit-learn.scikit-learn?branchName=main
